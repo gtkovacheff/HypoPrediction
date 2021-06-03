@@ -64,14 +64,47 @@ activity.loc[activity['Distance'] > 200, 'Distance'] = activity.loc[activity['Di
 #remove NaN distances and above 45km clear oactivity = activity.dropna(subset=['Distance'])
 activity = activity[activity['Distance'] < 49]
 
+#fix activity on 2020-12-03 --> set time to be 1 hour and distance = 4.78 based on the website data
+activity.loc[activity['Distance']==13.39, 'Time'] = "01:00:00"
+activity.loc[activity['Distance']==13.39, 'Distance'] = 4.78
+activity.loc[activity['Distance']==4.78]
+
+
 #remove 0 Calories, it is wrong data
 activity = activity[~activity['Calories'].isna()]
 
-#impute Avg HR to be mean of Avg HR
+#impute Avg HR to be mean of Avg HR --> ## TODO: avg HR should be part of the pipeline
 activity.loc[activity['Avg HR'].isna(), 'Avg HR'] = round(np.mean(activity['Avg HR']), 2)
 
-
+activity.reset_index(inplace=True, drop=True)
+#TODO feature engineering as well
 # Feature engineering
+
+def extract_time_plus_minus(data):
+    timedelta_zip = pd.Series([timedelta(hours=h,
+                                     minutes=m,
+                                     seconds=s) for h,m,s in zip(pd.to_datetime(activity['Time']).dt.hour,
+                 pd.to_datetime(activity['Time']).dt.minute,
+                 pd.to_datetime(activity['Time']).dt.second)
+                           ])
+
+    data['Timestamp'] = pd.to_datetime(data['Date'])
+    # data['Date'] = data['Timestamp'].dt.date
+    data['TimeStart'] = data['Timestamp'].dt.time
+    data['TimeFinish'] = (data['Timestamp'] + timedelta_zip).dt.time
+    data['Date'] = data['Timestamp'].dt.date
+
+    return data[['Timestamp', 'Date', 'Time', 'TimeStart', 'TimeFinish', 'Activity Type', 'Distance', 'Calories', 'Avg HR']]
+
+
+
+# EndTime=lambda x: x['StartTime'].dt.time + pd.to_datetime(x['Time']).dt.time,
+# TimePlus4=lambda x: (pd.to_datetime(data['Date']) + timedelta(hours=4)).dt.time,
+# TimeMinus3=lambda x: (pd.to_datetime(data['Date']) - timedelta(hours=3)).dt.time,
+
+tmp = extract_time_plus_minus(activity)
+tmp['Timestamp'][2]
+
 activity['TimePlus4'] = (pd.to_datetime(activity['Date']) + timedelta(hours=4)).dt.time
 activity['TimeMinus3'] = (pd.to_datetime(activity['Date']) - timedelta(hours=3)).dt.time
 
@@ -169,19 +202,3 @@ for x in data['Date'].unique():
 #     if x <= 4:
 #         cnt+=1
 #     return(cnt)
-
-import numpy as np
-arr = np.array([[0, 1, 0, 0],
-                [3, 2, 1, 0],
-                [-2, 3, 2, 1],
-                [1, -6, 0, 1]])
-
-np.linalg.det(arr)
-
-arr = np.array([[-3, 9],
-               [6, -17]])
-
-A_inv = np.linalg.inv(arr)
-b = np.array([1, 5, 0])
-
-np.dot(b, A_inv)
