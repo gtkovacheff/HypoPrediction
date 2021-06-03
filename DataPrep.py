@@ -2,38 +2,22 @@ import pandas as pd
 import numpy as np
 import datetime
 from datetime import timedelta
+from pdb import set_trace
+
+from func import extract_time_plus_minus, clean_data, load_clean_bg, to_timedelta
+
 #some predefined options for pandas
 with open('pandasOptions.txt', 'r') as f:
     for line in f:
         pd.set_option(line.split("=")[0], int(line.split("=")[1]))
 
 #read the cvs
-# bg = pd.read_csv("Data/BloodG.txt", skiprows=3, sep='\t')
-# bg.columns
-#
-# #extract only those with relevant info
-# bg = bg[['Time', 'Glucose (mmol/L)']]
-# bg = bg.rename(columns={'Time': 'Date', 'Glucose (mmol/L)': 'Glucose'})
-#
-# #fix the date substracting the timedelta from last day in the dataset
-# bg.loc[:, 'Date'] = pd.to_datetime(bg['Date'])
-# bg['Time'] = bg['Date'].dt.time
-# bg.loc[:, 'Date'] = bg.loc[:, 'Date'].dt.date
-#
-# delta_date = datetime.datetime(2021, 4, 23).date()
-# delta = bg.loc[1047, 'Date'] - delta_date
-#
-# #reassign the date
-# bg.loc[:, 'Date'] = list(map(lambda x: x - datetime.timedelta(delta.days), bg['Date']))
-#
-#
-# #rearrange the columns
-# bg = bg[['Date', 'Time', 'Glucose']]
-#
-# #safe the data
-# bg.to_csv('Data/Prepped/BloodGlucose.csv')
+# bg = load_clean_bg(safe = True)
+
 bg = pd.read_csv('Data/Prepped/BloodGlucose.csv', index_col=0)
 bg['Date'] = pd.to_datetime(bg['Date']).dt.date
+bg.rename(columns={'Time': 'TimeBG',
+                   'Date': 'DateBG'}, inplace=True)
 
 #read the activity data
 activity = pd.read_csv('Data/Activities.csv')
@@ -42,87 +26,75 @@ activity.drop(columns=['Grit', 'Flow', 'Bottom Time', 'Min Temp', 'Surface Inter
                        'Avg Run Cadence', 'Max Run Cadence', 'Avg Pace', 'Best Pace', 'Elev Gain', 'Elev Loss', 'Avg Stride Length', 'Climb Time',
                        'Max HR', 'Best Lap Time', 'Number of Laps', 'Total Strokes', 'Avg. Swolf', 'Avg Stroke Rate', 'Total Reps', 'Total Sets'], inplace=True)
 
-#replace , with '' and -- with NaN
-activity['Distance'] = [x.replace(',', '') for x in activity['Distance']]
-activity['Distance'] = [x.replace('--', 'NaN') for x in activity['Distance']]
 
-activity['Calories'] = [x.replace('--', 'NaN') for x in activity['Calories']]
-activity['Calories'] = [x.replace(',', '') for x in activity['Calories']]
+#TODO feature engineering
+#TODO Time column in minutes, think about it
 
-#transform the following columns into numeric format format
-for x in ['Distance', 'Calories', 'Avg HR']:
-    activity[x] = pd.to_numeric(activity[x], 'coerce')
+activity = clean_data(activity)
+activity = extract_time_plus_minus(activity)
 
-#Distance above 200 should be divided by 1000 to be transformed into km
-activity.loc[activity['Distance'] > 200, 'Distance'] = activity.loc[activity['Distance'] > 200, 'Distance']/1000
+for t in activity['Date']:
+    print(f"{t} has shape {activity.loc[activity['Date'] == t].shape}")
 
-# activity['Distance'].apply(lambda x: x + 10)
-# activity['Distance'].transform(lambda x: x + 10)
+tst = activity[activity['Date'] == pd.to_datetime('2021-04-22')]
 
+def one_row_per_date(data):
+    # set_trace()
+    data_new = data.copy()
+    data_new.loc[:, 'TimeStart'] = min(data_new.loc[:, 'TimeStart'])
+    data_new.loc[:, 'TimeFinish'] = max(data_new.loc[:, 'TimeFinish'])
+    list_activity_type = data_new.sort_values(by=['Activity Type'], axis=0).loc[:, 'Activity Type'].tolist()
+    data_new.loc[:, ['Activity Type']] = ['_'.join(list_activity_type)]
+    data_new['Time'] = list(map(lambda x: to_timedelta(x), list(data_new['Time'])))
 
-#remove NaN distances and above 45km clear outlier
-#remove NaN distances and above 45km clear oactivity = activity.dropna(subset=['Distance'])
-activity = activity[activity['Distance'] < 49]
+    data_new = data_new.groupby(['Date', 'TimeStart', 'TimeFinish', 'Activity Type']).\
+        agg({'Time': 'sum',
+             'Distance': 'sum',
+             'Calories': 'sum',
+             'Avg HR': 'mean'}).\
+        reset_index()
 
-#fix activity on 2020-12-03 --> set time to be 1 hour and distance = 4.78 based on the website data
-activity.loc[activity['Distance']==13.39, 'Time'] = "01:00:00"
-activity.loc[activity['Distance']==13.39, 'Distance'] = 4.78
-activity.loc[activity['Distance']==4.78]
+    return data_new
 
+#group the activity data into dates and apply the one_row_per_date function to every group :)
+activity_grouped = activity.groupby('Date')
+empty_df = pd.DataFrame()
+for name, group in activity_grouped:
+    print(name)
+    empty_df = pd.concat([empty_df, one_row_per_date(group)], axis=0)
 
-#remove 0 Calories, it is wrong data
-activity = activity[~activity['Calories'].isna()]
+activity_prepped = empty_df.reset_index(drop=True)
 
-#impute Avg HR to be mean of Avg HR --> ## TODO: avg HR should be part of the pipeline
-activity.loc[activity['Avg HR'].isna(), 'Avg HR'] = round(np.mean(activity['Avg HR']), 2)
-
-activity.reset_index(inplace=True, drop=True)
-#TODO feature engineering as well
-# Feature engineering
-
-def extract_time_plus_minus(data):
-    timedelta_zip = pd.Series([timedelta(hours=h,
-                                     minutes=m,
-                                     seconds=s) for h,m,s in zip(pd.to_datetime(activity['Time']).dt.hour,
-                 pd.to_datetime(activity['Time']).dt.minute,
-                 pd.to_datetime(activity['Time']).dt.second)
-                           ])
-
-    data['Timestamp'] = pd.to_datetime(data['Date'])
-    # data['Date'] = data['Timestamp'].dt.date
-    data['TimeStart'] = data['Timestamp'].dt.time
-    data['TimeFinish'] = (data['Timestamp'] + timedelta_zip).dt.time
-    data['Date'] = data['Timestamp'].dt.date
-
-    return data[['Timestamp', 'Date', 'Time', 'TimeStart', 'TimeFinish', 'Activity Type', 'Distance', 'Calories', 'Avg HR']]
-
-
-
-# EndTime=lambda x: x['StartTime'].dt.time + pd.to_datetime(x['Time']).dt.time,
-# TimePlus4=lambda x: (pd.to_datetime(data['Date']) + timedelta(hours=4)).dt.time,
-# TimeMinus3=lambda x: (pd.to_datetime(data['Date']) - timedelta(hours=3)).dt.time,
-
-tmp = extract_time_plus_minus(activity)
-tmp['Timestamp'][2]
-
-activity['TimePlus4'] = (pd.to_datetime(activity['Date']) + timedelta(hours=4)).dt.time
-activity['TimeMinus3'] = (pd.to_datetime(activity['Date']) - timedelta(hours=3)).dt.time
-
-activity['Time'] = pd.to_datetime(activity['Date']).dt.time
-activity['Timestamp'] = pd.to_datetime(activity['Date'])
-activity['Date'] = pd.to_datetime(activity['Date']).dt.date
-bg['Date']
-columns_reorder = ["Activity Type", "Timestamp", "Date", "Time", 'TimePlus4', 'TimeMinus3', "Distance", "Calories", "Avg HR"]
-activity = activity[columns_reorder]
+# activity_prepped.to_csv('Data/Prepped/Activity_prepped' + str(datetime.datetime.now().date()) + '.csv')
 
 #merge the two data sets
-data = pd.merge(activity, bg, how='inner', on=['Date'])
+data = pd.merge(activity_prepped, bg, how='inner', left_on='Date', right_on='DateBG')
+data = data.drop(['DateBG'], axis=1).rename(columns={'Time': 'Duration'})#, drop DateBH and rename Time -> Duration
 
-for i in data['Date'].unique():
-    print(f'{i} date has {data.loc[data["Date"] == i].shape}')
+#TODO add in the function from func.py
+data['TimeBG'] = [datetime.time(hour=int(h), minute=int(m)) for h,m in zip([x.split(':')[0] for x in data['TimeBG']],
+                                                  [x.split(':')[1] for x in data['TimeBG']])]
 
+# #explore the data structure for each day
+# for i in data['Date'].unique():
+#     print(f'{i} date has {data.loc[data["Date"] == i].shape}')
 
+# the goal is to have Date, Duration, TimeStart, TimeFinish, Activity Type, Distance, Calories, Avg HR, Glucose Prior, Glucose After
+#lets use the sample 20210422
 temp = data.loc[data['Date'] == pd.to_datetime('2021-04-22')]
+
+
+#TODO PRE POST GLUCOSE COLUMNS
+temp['TimeStart'][173] > temp['TimeBG'][173]
+
+
+
+
+
+
+
+
+
 
 def transform_data(df):
     df['Bool_1'] = (df['TimeMinus3'] < df['Time_y'])
