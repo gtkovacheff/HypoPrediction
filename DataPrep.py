@@ -1,10 +1,16 @@
 import pandas as pd
 import numpy as np
 import datetime
-from datetime import timedelta
-from pdb import set_trace
+import pickle
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.compose import make_column_selector as selector
+from sklearn.ensemble import GradientBoostingRegressor
 
-from func import extract_time_plus_minus, clean_data, load_clean_bg, to_timedelta
+
+from func import extract_time_plus_minus, clean_data, load_clean_bg, to_timedelta, one_row_per_date, transform_glucose
 
 #some predefined options for pandas
 with open('pandasOptions.txt', 'r') as f:
@@ -28,39 +34,22 @@ activity.drop(columns=['Grit', 'Flow', 'Bottom Time', 'Min Temp', 'Surface Inter
 
 
 #TODO feature engineering
-#TODO Time column in minutes, think about it
 
 activity = clean_data(activity)
 activity = extract_time_plus_minus(activity)
+activity = activity.loc[activity['TimeStart'] > datetime.time(12)]
+
 
 for t in activity['Date']:
     print(f"{t} has shape {activity.loc[activity['Date'] == t].shape}")
 
-tst = activity[activity['Date'] == pd.to_datetime('2021-04-22')]
 
-def one_row_per_date(data):
-    # set_trace()
-    data_new = data.copy()
-    data_new.loc[:, 'TimeStart'] = min(data_new.loc[:, 'TimeStart'])
-    data_new.loc[:, 'TimeFinish'] = max(data_new.loc[:, 'TimeFinish'])
-    list_activity_type = data_new.sort_values(by=['Activity Type'], axis=0).loc[:, 'Activity Type'].tolist()
-    data_new.loc[:, ['Activity Type']] = ['_'.join(list_activity_type)]
-    data_new['Time'] = list(map(lambda x: to_timedelta(x), list(data_new['Time'])))
-
-    data_new = data_new.groupby(['Date', 'TimeStart', 'TimeFinish', 'Activity Type']).\
-        agg({'Time': 'sum',
-             'Distance': 'sum',
-             'Calories': 'sum',
-             'Avg HR': 'mean'}).\
-        reset_index()
-
-    return data_new
 
 #group the activity data into dates and apply the one_row_per_date function to every group :)
 activity_grouped = activity.groupby('Date')
 empty_df = pd.DataFrame()
 for name, group in activity_grouped:
-    print(name)
+    print(name, ' has min data -- >>', group['TimeStart'].min())
     empty_df = pd.concat([empty_df, one_row_per_date(group)], axis=0)
 
 activity_prepped = empty_df.reset_index(drop=True)
@@ -70,72 +59,83 @@ activity_prepped = empty_df.reset_index(drop=True)
 #merge the two data sets
 data = pd.merge(activity_prepped, bg, how='inner', left_on='Date', right_on='DateBG')
 data = data.drop(['DateBG'], axis=1).rename(columns={'Time': 'Duration'})#, drop DateBH and rename Time -> Duration
-
-#TODO add in the function from func.py
-data['TimeBG'] = [datetime.time(hour=int(h), minute=int(m)) for h,m in zip([x.split(':')[0] for x in data['TimeBG']],
-                                                  [x.split(':')[1] for x in data['TimeBG']])]
-
+data['TimeBG'] = [datetime.time(hour=int(h), minute=int(m)) for h, m in
+                  zip([x.split(':')[0] for x in data['TimeBG']], [x.split(':')[1] for x in data['TimeBG']])]
 # #explore the data structure for each day
 # for i in data['Date'].unique():
 #     print(f'{i} date has {data.loc[data["Date"] == i].shape}')
 
 # the goal is to have Date, Duration, TimeStart, TimeFinish, Activity Type, Distance, Calories, Avg HR, Glucose Prior, Glucose After
 #lets use the sample 20210422
-temp = data.loc[data['Date'] == pd.to_datetime('2021-04-22')]
+
+data_grouped = data.groupby('Date')
+
+empty_df = pd.DataFrame()
+for name, group in data_grouped:
+    print(name)
+    empty_df = pd.concat([empty_df, transform_glucose(group)], axis=0)
+
+data = empty_df.astype({'Distance': 'double',
+                        'Calories': 'double',
+                        'Avg HR': 'double',
+                        'PreGlucose': 'double',
+                        'PreGlucose': 'double',
+                        'PostGlucose': 'double'}).\
+    reset_index(drop=True).\
+    drop('PostGlucoseTime', axis=1)
 
 
-#TODO PRE POST GLUCOSE COLUMNS
-temp['TimeStart'][173] > temp['TimeBG'][173]
+data
 
+# numeric_features = ['Distance', 'Calories', 'Avg HR', 'PreGlucose', 'PostGlucose']
+numeric_transformer = Pipeline(steps=[('imputer', SimpleImputer(strategy='median'))])
+standart_scaler_transformer = Pipeline(steps=[('scaler', StandardScaler())])
+categorical_transformer = Pipeline(steps=[('one_hot_encoder', OneHotEncoder(handle_unknown='ignore'))])
 
+data['PostGlucose'] = numeric_transformer.fit_transform(data['PostGlucose'].values.reshape(-1, 1)).reshape(-1)
 
+preprocessor = ColumnTransformer(transformers=[
+    ('num', numeric_transformer, selector(dtype_include='float64')),
+    ('num_scale', standart_scaler_transformer, selector(dtype_include='float64')),
+    ('cat', categorical_transformer, selector(dtype_exclude='object'))
+])
 
+reg_pipeline = Pipeline(steps=[('preprocessor', preprocessor),
+                               ('regressor', GradientBoostingRegressor())])
 
+X_train, y_train = data[['Activity Type', 'Distance', 'Calories', 'Avg HR', 'PreGlucose']], data[['PostGlucose']]
 
+reg_pipeline.fit(X_train, y_train)
+reg_pipeline.score(X_train, y_train)
 
+reg_pipeline.predict(X_train.loc[0].to_frame().transpose())
+y_train.loc[0]
 
+#test 1 is ok
+test = {'Activity Type': 'Cardio', 'Distance':0, 'Calories': 74 , 'Avg HR': 102, 'PreGlucose':9.2}
+reg_pipeline.predict(pd.DataFrame(test, index=[0]))
 
+#predicts:4.96 True: 5.7
 
-def transform_data(df):
-    df['Bool_1'] = (df['TimeMinus3'] < df['Time_y'])
-    df['Bool_2'] = (df['Time_y'] < df['TimePlus4'])
-    df['Bool'] = (df['Bool_1'] & df['Bool_2'])
+#test 2 is ok
+test = {'Activity Type': 'Running', 'Distance':3.74, 'Calories': 618 , 'Avg HR': 150, 'PreGlucose':12.2}
+reg_pipeline.predict(pd.DataFrame(test, index=[0]))
 
-    df = df[df['Bool'] == True]
+#predicts:6.4 True: 7.2
 
-    df = df.drop(['Bool_1', 'Bool_2', 'Bool'], axis=1)
+#test 3 doesn't work as Distance --> np.NaN is invalid
+test = {'Activity Type': 'Running', 'Distance':np.NAN, 'Calories': 618 , 'Avg HR': 150, 'PreGlucose':12.2}
+reg_pipeline.predict(pd.DataFrame(test, index=[0]))
 
-    activity_type = "_".join(temp['Activity Type'].unique())
-    prior_glucose = df.loc[temp['Time_y'] == min(df['Time_y']), 'Glucose'].unique()[0]
-    post_glucose = df.loc[temp['Time_y'] == max(df['Time_y']), 'Glucose'].unique()[0]
+# safe the model
+with open('saved_models/gbm_1.pkl', 'wb') as m:
+    pickle.dump(reg_pipeline, m)
 
+#TO BE CONTINUED
+with open('saved_models/gbm_1.pkl', 'rb') as m:
+    reg_pipeline_loaded = pickle.load(m)
 
-    df = df.drop(["Activity Type", 'Glucose', 'Time_y'], axis=1).drop_duplicates().groupby(by=['Date']).\
-        agg({'Distance': np.sum,
-            'Calories': np.sum,
-            'Avg HR': np.mean}).\
-        reset_index()
-
-    df['Activity'] = activity_type
-    df['Post_Glucose'] = post_glucose
-    df['Pre_Glucose'] = prior_glucose
-
-    return df
-
-df = pd.DataFrame()
-df.append(data.iloc[1])
-pd.concat([data.iloc[1], data.iloc[1]], axis=1)
-
-
-for x in data['Date'].unique():
-    print(x)
-    temp = transform_data(x)
-    df = df.append(temp)
-
-
-
-
-# TO DO NEXT
+# Graphics on Blood Glucose
 #
 # bg.loc[1, 'Time'] > datetime.time(4, 40)
 #
